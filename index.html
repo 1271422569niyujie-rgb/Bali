@@ -381,6 +381,7 @@
       </div>
       <div class="toolbar-group">
         <button class="control-button" id="edit-page" type="button">✎ 编辑全部文字</button>
+        <button class="control-button" id="export-share" type="button">📤 导出分享版 HTML</button>
         <button class="control-button" id="print-plan" type="button">🖨 打印 / 导出 PDF</button>
         <button class="control-button danger" id="restore-defaults" type="button">↺ 恢复默认内容</button>
       </div>
@@ -695,8 +696,12 @@
     let pendingImageCard = null;
 
     function safeGet(key) {
-      try { return localStorage.getItem(key); }
-      catch (error) { return null; }
+      try {
+        const saved = localStorage.getItem(key);
+        if (saved !== null) return saved;
+      } catch (error) {}
+      const embedded = window.__EMBEDDED_TRIP_STATE__;
+      return embedded && Object.prototype.hasOwnProperty.call(embedded, key) ? embedded[key] : null;
     }
 
     function safeSet(key, value) {
@@ -956,6 +961,85 @@
       }
     }
 
+    function utf8ToBase64(value) {
+      const bytes = new TextEncoder().encode(value);
+      let binary = '';
+      const chunkSize = 32768;
+      for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+        binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+      }
+      return btoa(binary);
+    }
+
+    function exportShareHtml() {
+      saveEditableScope(document);
+      safeSet(`${STORAGE_PREFIX}:active`, activePlan);
+
+      const state = { ...(window.__EMBEDDED_TRIP_STATE__ || {}) };
+      try {
+        Object.keys(localStorage)
+          .filter(key => key.startsWith(STORAGE_PREFIX))
+          .forEach(key => { state[key] = localStorage.getItem(key); });
+      } catch (error) {}
+      state[`${STORAGE_PREFIX}:active`] = activePlan;
+
+      const encodedState = utf8ToBase64(JSON.stringify(state));
+      const snapshotId = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+      const markerKey = `indonesia-trip-share:${snapshotId}`;
+      const resetKey = `indonesia-trip-share-reset:${snapshotId}`;
+      const clone = document.documentElement.cloneNode(true);
+
+      clone.querySelector('body')?.classList.remove('page-editing');
+      clone.querySelectorAll('[contenteditable]').forEach(element => element.removeAttribute('contenteditable'));
+      clone.querySelectorAll('.day-card.editing').forEach(card => card.classList.remove('editing'));
+      clone.querySelectorAll('.edit-text').forEach(button => { button.textContent = '✎ 编辑本卡文字'; });
+      const editPageButton = clone.querySelector('#edit-page');
+      if (editPageButton) editPageButton.textContent = '✎ 编辑全部文字';
+      const clonedToast = clone.querySelector('#toast');
+      if (clonedToast) { clonedToast.classList.remove('show'); clonedToast.textContent = ''; }
+      clone.querySelector('#embedded-share-state')?.remove();
+
+      const bootstrap = document.createElement('script');
+      bootstrap.id = 'embedded-share-state';
+      bootstrap.textContent = `(() => {
+        const bytes = Uint8Array.from(atob('${encodedState}'), char => char.charCodeAt(0));
+        const data = JSON.parse(new TextDecoder().decode(bytes));
+        const markerKey = '${markerKey}';
+        const resetKey = '${resetKey}';
+        let reset = false;
+        try {
+          reset = localStorage.getItem(resetKey) === '1';
+          if (!reset && localStorage.getItem(markerKey) !== '1') {
+            Object.keys(localStorage)
+              .filter(key => key.startsWith('${STORAGE_PREFIX}'))
+              .forEach(key => localStorage.removeItem(key));
+            Object.entries(data).forEach(([key, value]) => localStorage.setItem(key, value));
+            localStorage.setItem(markerKey, '1');
+          }
+        } catch (error) {}
+        window.__EMBEDDED_TRIP_STATE__ = reset ? null : data;
+        window.__EMBEDDED_TRIP_RESET_KEY__ = resetKey;
+      })();`;
+
+      const mainScript = [...clone.querySelectorAll('script')].find(script => script.textContent.includes('const PHOTO'));
+      if (mainScript) mainScript.parentNode.insertBefore(bootstrap, mainScript);
+      else clone.querySelector('body').appendChild(bootstrap);
+
+      const output = '<!doctype html>\n' + clone.outerHTML;
+      const blob = new Blob([output], { type: 'text/html;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      const now = new Date();
+      const stamp = [now.getFullYear(), String(now.getMonth() + 1).padStart(2, '0'), String(now.getDate()).padStart(2, '0')].join('');
+      link.href = url;
+      link.download = `2026印尼国庆旅行攻略-分享版-${stamp}.html`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1500);
+      showToast('分享版 HTML 已生成，可以直接发给朋友');
+    }
+
     function setAll(expanded) {
       document.querySelectorAll('.day-card').forEach(card => {
         card.classList.toggle('expanded', expanded);
@@ -982,6 +1066,10 @@
       try {
         Object.keys(localStorage).filter(key => key.startsWith(STORAGE_PREFIX)).forEach(key => localStorage.removeItem(key));
       } catch (error) {}
+      if (window.__EMBEDDED_TRIP_RESET_KEY__) {
+        try { localStorage.setItem(window.__EMBEDDED_TRIP_RESET_KEY__, '1'); } catch (error) {}
+      }
+      window.__EMBEDDED_TRIP_STATE__ = null;
       pageEditing = false;
       document.body.classList.remove('page-editing');
       document.getElementById('edit-page').textContent = '✎ 编辑全部文字';
@@ -1005,6 +1093,7 @@
     document.getElementById('expand-all').addEventListener('click', () => setAll(true));
     document.getElementById('collapse-all').addEventListener('click', () => setAll(false));
     document.getElementById('edit-page').addEventListener('click', togglePageEdit);
+    document.getElementById('export-share').addEventListener('click', exportShareHtml);
     document.getElementById('restore-defaults').addEventListener('click', restoreDefaults);
     document.getElementById('print-plan').addEventListener('click', () => window.print());
     document.getElementById('image-upload').addEventListener('change', event => handleImageUpload(event.target.files?.[0]));
